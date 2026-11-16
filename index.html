@@ -917,11 +917,12 @@
   }
 </style>
 
+
 </head>
 <body>
 
   <!-- Loading Screen (Full page) -->
-  <div id="full-loader" class="full-loader" role="status" aria-live="polite">
+  <div id="full-loader" class="full-loader" role="status" aria-live="polite" style="display: none;">
     <div class="spinner" aria-hidden="true"></div>
     <p id="loader-text">กำลังโหลดข้อมูล...</p>
   </div>
@@ -1296,16 +1297,39 @@
   <script>
   const GAS_API_URL = "https://script.google.com/macros/s/AKfycbwFfGfF-diWc8gEZ9Z_suegjq0ajOqpKcZs-H0Nc5jBhTEXoKxXOUb5eHoPrtXtxR08/exec";
   let currentAccount = 'main';
+
+  const FALLBACK_CATEGORIES = {
+    income: ["เงินเดือน", "รายได้เสริม", "โบนัส", "ปรับยอดบัญชี", "อื่นๆ"],
+    expense: [
+      {
+        group: "ค่าใช้จ่ายหลัก (รายเดือน)",
+        items: ["ค่าไฟบ้าน", "ค่าไฟห้อง", "ค่าบัตร KTC", "ค่าบัตร T1", "ค่าผ่อน I phone", "ค่าโทรศัพท์เรา", "ค่าโทรศัพท์พ่อ", "ค่าโทรศัพท์เเม่", "ค่าประกันเรา", "ค่าเน็ต 3BB", "shopee pay", "ค่าข้าวกลางวัน", "ค่า google Ultra", "ค่าเก็บออม Kept"]
+      },
+      {
+        group: "ค่าใช้จ่ายเพิ่มเติม (จิปาถะ)",
+        items: ["กิน", "ซื้อของเข้าบ้าน", "คนยืม", "เที่ยว", "เติมน้ำมัน", "เติมเกม", "ปรับยอดบัญชี", "อื่นๆ"]
+      }
+    ]
+  };
+
   let appData = {
-    summary: { income: 0, expense: 0, balance: 0, cycleText: "ยอดคงเหลือ" },
-    categories: { income: [], expense: [] },
+    summary: { income: 0, expense: 0, balance: 0, cycleText: "ยอดคงเหลือ", startDate: "", endDate: "2099-12-31", salaryDates: [] },
+    categories: FALLBACK_CATEGORIES,
     recentTransactions: [],
+    allTransactions: [],
     billStatus: []
   };
 
   function getTodayLocalStr() {
     const d = new Date();
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, '0') + "-" + String(d.getDate()).padStart(2, '0');
+  }
+
+  function formatThaiDateShort(ymdStr) {
+    if (!ymdStr) return "";
+    const parts = ymdStr.split("-");
+    const thMonths = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+    return `${parseInt(parts[2], 10)} ${thMonths[parseInt(parts[1], 10) - 1]}`;
   }
 
   function isGasEnvironment() {
@@ -1336,42 +1360,139 @@
   }
 
   function getCacheKey(acc) {
-    return 'money_tracker_v2_' + acc;
+    return 'money_tracker_v3_' + acc;
   }
 
-  function loadInitialDataWithCache(acc, showLoaderIfNoCache = true) {
+  // Recomputes summary, recentTransactions, and billStatus locally in 0ms from allTransactions
+  function recomputeLocalAppData() {
+    const allTx = appData.allTransactions || appData.recentTransactions || [];
+    const salaryDatesSet = new Set();
+    allTx.forEach(tx => {
+      if (String(tx.category || "").trim() === "เงินเดือน" && tx.date) {
+        salaryDatesSet.add(tx.date);
+      }
+    });
+    const salaryDates = [...salaryDatesSet].sort((a, b) => b.localeCompare(a));
+
+    let startDateStr, endDateStr, cycleText;
+    if (currentAccount === 'kept') {
+      startDateStr = "1970-01-01";
+      endDateStr = "2099-12-31";
+      cycleText = "ยอดเงินรวมทั้งหมด (Kept)";
+    } else if (currentAccount === 'kplus') {
+      startDateStr = "1970-01-01";
+      endDateStr = "2099-12-31";
+      cycleText = "ยอดเงินรวมรายได้เสริม (K PLUS)";
+    } else if (salaryDates.length > 0) {
+      startDateStr = salaryDates[0];
+      endDateStr = "2099-12-31";
+      cycleText = `รอบเริ่ม ${formatThaiDateShort(startDateStr)} - ปัจจุบัน`;
+    } else {
+      const today = new Date();
+      const s = new Date(today.getFullYear(), today.getMonth(), 1);
+      const e = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+      startDateStr = s.getFullYear() + "-" + String(s.getMonth() + 1).padStart(2, '0') + "-01";
+      endDateStr = e.getFullYear() + "-" + String(e.getMonth() + 1).padStart(2, '0') + "-" + String(e.getDate()).padStart(2, '0');
+      cycleText = `รอบ ${formatThaiDateShort(startDateStr)} - ${formatThaiDateShort(endDateStr)}`;
+    }
+
+    let totalIncome = 0;
+    let totalExpense = 0;
+    let categorySummary = {};
+    let recentTx = [];
+
+    allTx.forEach(tx => {
+      if (tx.date >= startDateStr && tx.date <= endDateStr) {
+        const amt = parseFloat(tx.amount) || 0;
+        if (tx.type === 'รายรับ') {
+          totalIncome += amt;
+        } else if (tx.type === 'รายจ่าย') {
+          totalExpense += amt;
+          categorySummary[tx.category] = (categorySummary[tx.category] || 0) + amt;
+        }
+        if (recentTx.length < 50) {
+          recentTx.push(tx);
+        }
+      }
+    });
+
+    const monthlyItems = (appData.categories && appData.categories.expense && appData.categories.expense[0])
+      ? appData.categories.expense[0].items
+      : FALLBACK_CATEGORIES.expense[0].items;
+    const billStatus = monthlyItems.map(billName => ({
+      name: billName,
+      paid: Boolean(categorySummary[billName]),
+      amount: categorySummary[billName] || 0
+    }));
+
+    appData.summary = {
+      income: totalIncome,
+      expense: totalExpense,
+      balance: totalIncome - totalExpense,
+      categorySummary: categorySummary,
+      cycleText: cycleText,
+      startDate: startDateStr,
+      endDate: endDateStr,
+      salaryDates: salaryDates
+    };
+    appData.recentTransactions = recentTx;
+    appData.billStatus = billStatus;
+
+    try {
+      localStorage.setItem(getCacheKey(currentAccount), JSON.stringify(appData));
+    } catch (e) {}
+  }
+
+  function loadInitialDataWithCache(acc) {
     let hadCache = false;
     try {
-      const cached = localStorage.getItem(getCacheKey(acc));
+      const cached = localStorage.getItem(getCacheKey(acc)) || localStorage.getItem('money_tracker_v2_' + acc);
       if (cached) {
         const parsed = JSON.parse(cached);
         if (parsed && parsed.summary) {
           hadCache = true;
-          onDataLoaded(parsed, true);
+          if (!parsed.allTransactions) parsed.allTransactions = parsed.recentTransactions || [];
+          if (acc === currentAccount) {
+            onDataLoaded(parsed);
+          }
         }
       }
     } catch (e) {}
 
-    if (!hadCache && showLoaderIfNoCache) {
-      showFullLoader("กำลังโหลดข้อมูล...");
+    if (!hadCache && acc === currentAccount) {
+      // Hide loader quickly if it takes too long, or show empty state while fetching
+      hideFullLoader();
     }
 
     callBackend('getInitialData', { account: acc }, (freshData) => {
       if (freshData && freshData.summary) {
+        if (!freshData.allTransactions) {
+          freshData.allTransactions = freshData.recentTransactions || [];
+        }
         try {
           localStorage.setItem(getCacheKey(acc), JSON.stringify(freshData));
         } catch (e) {}
-        onDataLoaded(freshData, false);
-      } else {
+        if (acc === currentAccount) {
+          onDataLoaded(freshData);
+        }
+      } else if (acc === currentAccount) {
         hideFullLoader();
       }
-    }, onError);
+    }, () => {
+      if (acc === currentAccount) hideFullLoader();
+    });
   }
 
   // On Load
   document.addEventListener("DOMContentLoaded", () => {
     document.getElementById('date').value = getTodayLocalStr();
-    loadInitialDataWithCache(currentAccount, true);
+    hideFullLoader();
+    loadInitialDataWithCache('main');
+    // Preload Kept and K PLUS silently in the background so switching accounts is 0ms instant
+    setTimeout(() => {
+      loadInitialDataWithCache('kept');
+      loadInitialDataWithCache('kplus');
+    }, 800);
   });
 
   function switchAccount(acc) {
@@ -1401,12 +1522,33 @@
       badgeIconEl.innerHTML = '<i class="fa-solid fa-building-columns" aria-hidden="true"></i>';
     }
 
+    // Set default empty state immediately for instant response before cache/network resolves
+    appData = {
+      summary: {
+        income: 0,
+        expense: 0,
+        balance: 0,
+        cycleText: acc === 'kept' ? "ยอดเงินรวมทั้งหมด (Kept)" : acc === 'kplus' ? "ยอดเงินรวมรายได้เสริม (K PLUS)" : "ยอดคงเหลือ",
+        startDate: "1970-01-01",
+        endDate: "2099-12-31",
+        salaryDates: []
+      },
+      categories: FALLBACK_CATEGORIES,
+      recentTransactions: [],
+      allTransactions: [],
+      billStatus: []
+    };
+    updateDashboard();
+    renderTransactions();
+
     switchTab('home');
-    loadInitialDataWithCache(currentAccount, true);
+    loadInitialDataWithCache(currentAccount);
   }
 
-  function onDataLoaded(data, isFromCache = false) {
+  function onDataLoaded(data) {
     appData = data;
+    if (!appData.categories) appData.categories = FALLBACK_CATEGORIES;
+    if (!appData.allTransactions) appData.allTransactions = appData.recentTransactions || [];
     updateDashboard();
     renderTransactions();
     
@@ -1414,6 +1556,9 @@
     if (appData.summary.endDate) document.getElementById('dash-end').value = appData.summary.endDate;
     
     initDashboardCycles();
+    if (document.getElementById('dashboard-view').classList.contains('active')) {
+      loadDashboard();
+    }
     hideFullLoader();
   }
 
@@ -1563,16 +1708,18 @@
   function deleteTx(id) {
     if (!confirm("ต้องการลบรายการนี้ใช่หรือไม่?")) return;
     
-    showFullLoader("กำลังลบรายการ...");
+    // Optimistic delete in 0ms
+    appData.allTransactions = (appData.allTransactions || []).filter(tx => tx.id !== id);
+    appData.recentTransactions = (appData.recentTransactions || []).filter(tx => tx.id !== id);
+    recomputeLocalAppData();
+    onDataLoaded(appData);
+    showToast("ลบรายการเรียบร้อยแล้ว");
+
     callBackend('deleteTransaction', { id: id, account: currentAccount }, (res) => {
-      if (res && res.success) {
-        showToast(res.message);
-        loadInitialDataWithCache(currentAccount, false);
-      } else {
-        hideFullLoader();
-        showToast("ลบไม่สำเร็จ: " + (res ? res.message : ""));
+      if (!res || !res.success) {
+        loadInitialDataWithCache(currentAccount);
       }
-    }, onError);
+    }, () => loadInitialDataWithCache(currentAccount));
   }
 
   // ==========================================
@@ -1629,7 +1776,7 @@
   }
 
   // Smart Balance Adjuster Modal
-  let currentAdjustDiff = 0; // actual - sysBalance
+  let currentAdjustDiff = 0;
 
   function openAdjustModal() {
     const sysBal = parseFloat(appData.summary.balance) || 0;
@@ -1653,7 +1800,8 @@
       if (typeof cat === 'object' && cat.group) {
         const optgroup = document.createElement('optgroup');
         optgroup.label = cat.group;
-        cat.items.forEach(item => {
+        const itemsList = Array.isArray(cat.items) ? cat.items : String(cat.items || "").split(" ");
+        itemsList.forEach(item => {
           const opt = document.createElement('option');
           opt.value = item;
           opt.innerText = item;
@@ -1728,14 +1876,37 @@
     }
   }
 
+  function addOptimisticTransaction(formData) {
+    const tempId = 'temp-' + Date.now();
+    const newTx = {
+      id: tempId,
+      date: formData.date,
+      type: formData.type,
+      category: formData.category,
+      amount: parseFloat(formData.amount) || 0,
+      note: formData.note || "",
+      receiptUrl: ""
+    };
+    if (!appData.allTransactions) appData.allTransactions = [];
+    appData.allTransactions.unshift(newTx);
+    recomputeLocalAppData();
+    onDataLoaded(appData);
+
+    callBackend('addTransaction', { formData: formData, account: currentAccount }, (res) => {
+      if (res && res.success && res.id) {
+        newTx.id = res.id;
+        try {
+          localStorage.setItem(getCacheKey(currentAccount), JSON.stringify(appData));
+        } catch (e) {}
+      } else {
+        loadInitialDataWithCache(currentAccount);
+      }
+    }, () => loadInitialDataWithCache(currentAccount));
+  }
+
   function submitAdjustBalance(event) {
     event.preventDefault();
     if (currentAdjustDiff === 0) return;
-
-    const btn = document.getElementById('adjust-submit-btn');
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> กำลังบันทึก...';
-    btn.disabled = true;
 
     const isExpense = currentAdjustDiff < 0;
     const formData = {
@@ -1746,21 +1917,9 @@
       note: document.getElementById('adjust-note').value || 'รวบยอดตามเงินจริงในบัญชี'
     };
 
-    callBackend('addTransaction', { formData: formData, account: currentAccount }, (res) => {
-      if (res && res.success) {
-        showToast("ปรับยอดคงเหลือเรียบร้อยแล้ว!");
-        closeAdjustModal();
-        loadInitialDataWithCache(currentAccount, false);
-      } else {
-        showToast("เกิดข้อผิดพลาด: " + (res ? res.message : ""));
-      }
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    }, (err) => {
-      showToast("เชื่อมต่อเซิร์ฟเวอร์ล้มเหลว");
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    });
+    closeAdjustModal();
+    addOptimisticTransaction(formData);
+    showToast("ปรับยอดคงเหลือเรียบร้อยแล้ว!");
   }
 
   // UI Interactions
@@ -1774,7 +1933,6 @@
     const btn = document.getElementById('submit-btn');
     btn.className = `submit-btn ${type}-mode`;
     
-    // Reset form
     document.getElementById('amount').value = '';
     document.getElementById('inline-calc-input').value = '';
     document.getElementById('date').value = getTodayLocalStr();
@@ -1820,35 +1978,20 @@
 
   function submitSettings(event) {
     event.preventDefault();
-    const btn = document.getElementById('settings-submit-btn');
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> กำลังบันทึก...';
-    btn.disabled = true;
-
     const start = document.getElementById('cycle-start').value;
     const end = document.getElementById('cycle-end').value;
 
     if (start >= end) {
       showToast("วันสิ้นสุดรอบบิลต้องมากกว่าวันเริ่มต้น");
-      btn.innerHTML = originalText;
-      btn.disabled = false;
       return;
     }
 
+    closeSettings();
     callBackend('saveSettings', { startDate: start, endDate: end }, (res) => {
       if (res && res.success) {
         showToast(res.message);
-        closeSettings();
-        loadInitialDataWithCache(currentAccount, true);
-      } else {
-        showToast("ตั้งค่าไม่สำเร็จ: " + (res ? res.message : ""));
+        loadInitialDataWithCache(currentAccount);
       }
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    }, () => {
-      showToast("เชื่อมต่อเซิร์ฟเวอร์ล้มเหลว");
-      btn.innerHTML = originalText;
-      btn.disabled = false;
     });
   }
 
@@ -1938,7 +2081,6 @@
   function submitForm(event) {
     event.preventDefault();
     
-    // If user typed in inline calculator but forgot to press '=', auto-evaluate if amount is empty
     const amountEl = document.getElementById('amount');
     const calcVal = document.getElementById('inline-calc-input').value;
     if (!amountEl.value && calcVal) {
@@ -1948,11 +2090,6 @@
       }
     }
 
-    const btn = document.getElementById('submit-btn');
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> กำลังบันทึก...';
-    btn.disabled = true;
-
     const formData = {
       type: document.getElementById('form-type').value,
       amount: amountEl.value,
@@ -1961,21 +2098,9 @@
       note: document.getElementById('note').value
     };
 
-    callBackend('addTransaction', { formData: formData, account: currentAccount }, (res) => {
-      if (res && res.success) {
-        showToast(res.message);
-        closeForm();
-        loadInitialDataWithCache(currentAccount, false);
-      } else {
-        showToast("เกิดข้อผิดพลาด: " + (res ? res.message : ""));
-      }
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    }, () => {
-      showToast("เชื่อมต่อเซิร์ฟเวอร์ล้มเหลว");
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    });
+    closeForm();
+    addOptimisticTransaction(formData);
+    showToast("บันทึกข้อมูลเรียบร้อยแล้ว");
   }
 
   // Utilities
@@ -1996,21 +2121,31 @@
     }, 3000);
   }
 
+  let loaderHideTimer = null;
   function showFullLoader(text) {
+    if (loaderHideTimer) {
+      clearTimeout(loaderHideTimer);
+      loaderHideTimer = null;
+    }
     document.getElementById('loader-text').innerText = text;
     const loader = document.getElementById('full-loader');
     loader.style.display = 'flex';
-    setTimeout(() => loader.style.opacity = '1', 10);
+    loader.style.opacity = '1';
   }
 
   function hideFullLoader() {
     const loader = document.getElementById('full-loader');
+    if (!loader) return;
     loader.style.opacity = '0';
-    setTimeout(() => loader.style.display = 'none', 250);
+    if (loaderHideTimer) clearTimeout(loaderHideTimer);
+    loaderHideTimer = setTimeout(() => {
+      loader.style.display = 'none';
+      loaderHideTimer = null;
+    }, 200);
   }
 
   // ==========================================
-  // Dashboard & Navigation Logic
+  // Dashboard & Navigation Logic (100% Instant Local Computation!)
   // ==========================================
   function switchTab(tabId) {
     document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
@@ -2031,6 +2166,7 @@
   function initDashboardCycles() {
     const select = document.getElementById('dash-cycle-select');
     if (!select) return;
+    const previousSelection = select.value;
     select.innerHTML = '';
     
     const currentStart = appData.summary.startDate;
@@ -2126,6 +2262,15 @@
     customOpt.value = 'custom';
     customOpt.innerText = 'กำหนดช่วงวันที่เอง...';
     select.appendChild(customOpt);
+
+    if (previousSelection) {
+      for (let i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === previousSelection) {
+          select.selectedIndex = i;
+          break;
+        }
+      }
+    }
     
     handleCycleChange(false);
   }
@@ -2151,24 +2296,67 @@
     }
   }
 
+  // Instant 0ms Local Dashboard Calculation (No "กำลังดึงข้อมูลประวัติ..." Spinner!)
   function loadDashboard() {
     const start = document.getElementById('dash-start').value;
     const end = document.getElementById('dash-end').value;
     
-    if (!start || !end) {
-      showToast("กรุณาเลือกช่วงวันที่ให้ครบถ้วน");
-      return;
-    }
-    
-    showFullLoader("กำลังดึงข้อมูลประวัติ...");
-    callBackend('getDashboardData', { start: start, end: end, account: currentAccount }, (res) => {
-      hideFullLoader();
-      if (res && res.success) {
-        renderDashboardData(res.data);
-      } else {
-        showToast("โหลดข้อมูลล้มเหลว");
+    if (!start || !end) return;
+
+    const allTx = appData.allTransactions || appData.recentTransactions || [];
+    let totalIncome = 0;
+    let totalExpense = 0;
+    let categorySummary = {};
+    let transactions = [];
+
+    allTx.forEach(tx => {
+      if (tx.date >= start && tx.date <= end) {
+        const amt = parseFloat(tx.amount) || 0;
+        if (tx.type === 'รายรับ') {
+          totalIncome += amt;
+        } else if (tx.type === 'รายจ่าย') {
+          totalExpense += amt;
+          categorySummary[tx.category] = (categorySummary[tx.category] || 0) + amt;
+        }
+        transactions.push(tx);
       }
-    }, onError);
+    });
+
+    // Calculate previous cycle expense locally
+    const salaryDates = appData.summary.salaryDates || [];
+    let prevStartStr = "";
+    let prevEndStr = "";
+    const idx = salaryDates.indexOf(start);
+    const formatYMD = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, '0') + "-" + String(d.getDate()).padStart(2, '0');
+
+    if (idx !== -1 && idx + 1 < salaryDates.length) {
+      prevStartStr = salaryDates[idx + 1];
+      const prevEndObj = new Date(start + "T12:00:00");
+      prevEndObj.setDate(prevEndObj.getDate() - 1);
+      prevEndStr = formatYMD(prevEndObj);
+    } else {
+      const startObj = new Date(start + "T12:00:00");
+      const prevStartDate = new Date(startObj.getFullYear(), startObj.getMonth() - 1, startObj.getDate(), 12, 0, 0);
+      const prevEndDate = new Date(startObj.getFullYear(), startObj.getMonth(), startObj.getDate() - 1, 12, 0, 0);
+      prevStartStr = formatYMD(prevStartDate);
+      prevEndStr = formatYMD(prevEndDate);
+    }
+
+    let previousExpense = 0;
+    allTx.forEach(tx => {
+      if (tx.date >= prevStartStr && tx.date <= prevEndStr && tx.type === 'รายจ่าย') {
+        previousExpense += (parseFloat(tx.amount) || 0);
+      }
+    });
+
+    renderDashboardData({
+      income: totalIncome,
+      expense: totalExpense,
+      balance: totalIncome - totalExpense,
+      categorySummary: categorySummary,
+      transactions: transactions,
+      previousExpense: previousExpense
+    });
   }
 
   function renderDashboardData(data) {
@@ -2334,22 +2522,7 @@
   function deleteDashTx(id) {
     if (!confirm("ต้องการลบรายการนี้ใช่หรือไม่?")) return;
     closeCategoryDetails();
-    showFullLoader("กำลังลบรายการ...");
-    callBackend('deleteTransaction', { id: id, account: currentAccount }, (res) => {
-      if (res && res.success) {
-        showToast(res.message);
-        callBackend('getInitialData', { account: currentAccount }, (data) => {
-          try {
-            localStorage.setItem(getCacheKey(currentAccount), JSON.stringify(data));
-          } catch (e) {}
-          onDataLoaded(data);
-          loadDashboard();
-        }, onError);
-      } else {
-        hideFullLoader();
-        showToast("ลบไม่สำเร็จ: " + (res ? res.message : ""));
-      }
-    }, onError);
+    deleteTx(id);
   }
 
   function closeCategoryDetails() {
@@ -2357,6 +2530,7 @@
   }
 
 </script>
+
 
 </body>
 </html>
